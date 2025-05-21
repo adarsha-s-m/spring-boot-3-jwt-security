@@ -1,6 +1,9 @@
 package com.alibou.security.gemini;
 
+import com.google.auth.oauth2.GoogleCredentials;
+// import com.google.auth.oauth2.AccessToken; // May not be needed if setApiKey is sufficient
 import com.google.cloud.vertexai.VertexAI;
+import com.google.cloud.vertexai.VertexAiOptions;
 import com.google.cloud.vertexai.api.GenerateContentResponse;
 import com.google.cloud.vertexai.generativeai.GenerativeModel;
 import com.google.cloud.vertexai.generativeai.ResponseStream;
@@ -12,6 +15,7 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections; // Required for Collections.singletonList
 
 @Service
 @Slf4j
@@ -20,17 +24,17 @@ public class GeminiService {
     @Value("${GEMINI_API_KEY}")
     private String geminiApiKey;
 
-    @Value("${GEMINI_PROJECT_ID}") // To be added to application.yml or env vars
+    @Value("${GEMINI_PROJECT_ID}")
     private String projectId;
 
-    @Value("${GEMINI_LOCATION}") // To be added to application.yml or env vars
+    @Value("${GEMINI_LOCATION}")
     private String location;
 
-    @Value("${GEMINI_MODEL_NAME}") // e.g., "gemini-pro"
+    @Value("${GEMINI_MODEL_NAME}")
     private String modelName;
 
-
     public StreamingResponseBody streamQuery(String userQuery) {
+        // ... (parameter checks remain the same)
         if (geminiApiKey == null || geminiApiKey.isBlank()) {
             log.error("Gemini API key is not configured.");
             return outputStream -> {
@@ -61,35 +65,42 @@ public class GeminiService {
         }
 
         return outputStream -> {
-            // Try-with-resources to ensure VertexAI client is closed
-            try (VertexAI vertexAi = new VertexAI(projectId, location, geminiApiKey)) {
-                GenerativeModel model = new GenerativeModel(modelName, vertexAi);
-                ResponseStream<GenerateContentResponse> responseStream = model.generateContentStream(userQuery);
+            try {
+                GoogleCredentials credentials = GoogleCredentials.newBuilder()
+                    .setApiKey(geminiApiKey)
+                    // Optionally, if API requires specific scopes, though often not needed for API key auth
+                    // .createScoped(Collections.singletonList("https://www.googleapis.com/auth/cloud-platform"))
+                    .build();
 
-                // Process the stream
-                for (GenerateContentResponse response : responseStream) {
-                    // Assuming the response contains text parts.
-                    // You might need to adjust this based on the actual structure of Gemini Pro's response.
-                    response.getCandidatesList().forEach(candidate -> {
-                        candidate.getContent().getPartsList().forEach(part -> {
-                            if (part.hasText()) {
-                                try {
-                                    outputStream.write(part.getText().getBytes(StandardCharsets.UTF_8));
-                                    outputStream.flush();
-                                } catch (IOException e) {
-                                    log.error("Error writing to output stream", e);
-                                    // Difficult to handle this gracefully in the middle of a stream.
-                                    // Consider how to signal this to the client if necessary.
-                                    throw new RuntimeException("Error writing to output stream", e);
+                VertexAiOptions vertexAiOptions = VertexAiOptions.newBuilder()
+                    .setProjectId(projectId)
+                    .setLocation(location)
+                    .setCredentials(credentials)
+                    .build();
+
+                try (VertexAI vertexAi = new VertexAI(vertexAiOptions)) {
+                    GenerativeModel model = new GenerativeModel(modelName, vertexAi);
+                    ResponseStream<GenerateContentResponse> responseStream = model.generateContentStream(userQuery);
+
+                    for (GenerateContentResponse response : responseStream) {
+                        response.getCandidatesList().forEach(candidate -> {
+                            candidate.getContent().getPartsList().forEach(part -> {
+                                if (part.hasText()) {
+                                    try {
+                                        outputStream.write(part.getText().getBytes(StandardCharsets.UTF_8));
+                                        outputStream.flush();
+                                    } catch (IOException e) {
+                                        log.error("Error writing to output stream", e);
+                                        throw new RuntimeException("Error writing to output stream", e);
+                                    }
                                 }
-                            }
+                            });
                         });
-                    });
+                    }
                 }
             } catch (Exception e) {
                 log.error("Error during Gemini API call or streaming", e);
                 try {
-                    // Try to send an error message to the client if possible
                     outputStream.write(("Error: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
                     outputStream.flush();
                 } catch (IOException ex) {
