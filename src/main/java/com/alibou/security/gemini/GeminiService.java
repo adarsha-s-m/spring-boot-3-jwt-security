@@ -1,33 +1,25 @@
 package com.alibou.security.gemini;
 
-// Core Java and Spring
+import com.google.cloud.generativeai.v1.Content;
+import com.google.cloud.generativeai.v1.GenerateContentRequest;
+import com.google.cloud.generativeai.v1.GenerateContentResponse;
+import com.google.cloud.generativeai.v1.GenerativeModel; // This class might be from the new SDK too
+import com.google.cloud.generativeai.v1.Part;
+import com.google.cloud.generativeai.v1.PredictionServiceClient;
+import com.google.cloud.generativeai.v1.PredictionServiceSettings;
+import com.google.cloud.generativeai.v1.StreamGenerateContentRequest; // Specific request for streaming
+import com.google.cloud.generativeai.v1.StreamGenerateContentResponse; // Specific response for streaming
+
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
+
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
-
-// Logging
-import lombok.extern.slf4j.Slf4j;
-
-// Google Cloud GAX and Auth libraries (assuming these classes exist)
-import com.google.api.gax.core.FixedCredentialsProvider;
-import com.google.api.gax.rpc.FixedHeaderProvider;
-import com.google.api.gax.rpc.HeaderProvider;
-// Assuming a settings class exists, e.g., VertexAISettings
-import com.google.cloud.vertexai.VertexAI; // Main client
-import com.google.cloud.vertexai.VertexAISettings; // ASSUMED: Settings class for VertexAI
-// Potentially, if VertexAISettings is not found, this might be GenerativeModelSettings or similar
-// import com.google.cloud.vertexai.generativeai.GenerativeModelSettings;
-
-// Vertex AI specific classes
-import com.google.cloud.vertexai.api.GenerateContentResponse;
-import com.google.cloud.vertexai.generativeai.GenerativeModel;
-import com.google.cloud.vertexai.generativeai.ResponseStream;
-
+import java.util.Collections;
+import java.util.Iterator;
 
 @Service
 @Slf4j
@@ -36,93 +28,85 @@ public class GeminiService {
     @Value("${GEMINI_API_KEY}")
     private String geminiApiKey;
 
-    @Value("${GEMINI_PROJECT_ID}")
-    private String projectId;
+    // Project ID and Location are not typically used with google-generativeai SDK when using API key
+    // @Value("${GEMINI_PROJECT_ID}")
+    // private String projectId;
+    // @Value("${GEMINI_LOCATION}")
+    // private String location;
 
-    @Value("${GEMINI_LOCATION}")
-    private String location; // e.g., "us-central1"
+    @Value("${GEMINI_MODEL_NAME}") // e.g., "gemini-pro" or "gemini-1.5-pro-latest"
+    private String modelName;
 
-    @Value("${GEMINI_MODEL_NAME}")
-    private String modelName; // e.g., "gemini-pro"
 
     public StreamingResponseBody streamQuery(String userQuery) {
-        // Parameter checks (API key, projectId, location, modelName)
         if (geminiApiKey == null || geminiApiKey.isBlank()) {
-            // ... error handling ...
-            return outputStream -> outputStream.write("Error: API key missing".getBytes());
-        }
-        if (projectId == null || projectId.isBlank()) {
-            // ... error handling ...
-            return outputStream -> outputStream.write("Error: Project ID missing".getBytes());
-        }
-        if (location == null || location.isBlank()) {
-            // ... error handling ...
-            return outputStream -> outputStream.write("Error: Location missing".getBytes());
+            log.error("Gemini API key is not configured.");
+            return outputStream -> {
+                outputStream.write("Error: Gemini API key not configured.".getBytes(StandardCharsets.UTF_8));
+                outputStream.flush();
+            };
         }
         if (modelName == null || modelName.isBlank()) {
-            // ... error handling ...
-            return outputStream -> outputStream.write("Error: Model name missing".getBytes());
+            log.error("Gemini Model Name is not configured.");
+            return outputStream -> {
+                outputStream.write("Error: Gemini Model Name not configured.".getBytes(StandardCharsets.UTF_8));
+                outputStream.flush();
+            };
         }
 
         return outputStream -> {
+            PredictionServiceSettings settings = null;
             try {
-                String endpoint = String.format("%s-aiplatform.googleapis.com:443", location);
+                settings = PredictionServiceSettings.newBuilder()
+                        .setApiKey(geminiApiKey)
+                        .build();
+            } catch (IOException e) {
+                log.error("Error building PredictionServiceSettings: " + e.getMessage(), e);
+                writeErrorToStream(outputStream, "Error configuring Gemini client: " + e.getMessage());
+                return;
+            }
 
-                Map<String, String> headers = new HashMap<>();
-                headers.put("x-goog-api-key", geminiApiKey);
-                HeaderProvider headerProvider = FixedHeaderProvider.create(headers);
+            try (PredictionServiceClient predictionServiceClient = PredictionServiceClient.create(settings)) {
+                String fullModelName = String.format("models/%s", modelName);
 
-                // Attempt to use VertexAISettings
-                // This assumes VertexAISettings and its builder pattern exist.
-                VertexAISettings.Builder settingsBuilder = VertexAISettings.newBuilder()
-                        .setEndpoint(endpoint)
-                        .setHeaderProvider(headerProvider)
-                        .setCredentialsProvider(FixedCredentialsProvider.create(null));
+                Content content = Content.newBuilder()
+                        .addParts(Part.newBuilder().setText(userQuery))
+                        .build();
                 
-                // If there's a specific transport, like "grpc" or "rest"
-                // settingsBuilder.setTransportChannelProvider(
-                //     VertexAISettings.defaultGrpcTransportProviderBuilder()
-                //         .setHeaderProvider(headerProvider) // Some settings allow header provider per transport
-                //         .build());
-                // The above is an example if granular transport control is needed/available.
+                // Create a GenerateContentRequest for streaming
+                // Note: The user's sample used generateContent(model, Collections.singletonList(content)) for unary.
+                // For streaming, the method is often streamGenerateContent(request) or similar.
+                // The `com.google.cloud.generativeai.v1.GenerativeModel` class from this SDK
+                // is actually the preferred way to call for streaming.
 
-                VertexAISettings settings = settingsBuilder.build();
+                com.google.cloud.generativeai.v1.GenerativeModel generativeAiModel =
+                    new com.google.cloud.generativeai.v1.GenerativeModel(fullModelName, predictionServiceClient);
 
-                try (VertexAI vertexAi = VertexAI.create(settings)) { // Assumes VertexAI.create(settings) exists
-                    GenerativeModel model = new GenerativeModel(modelName, vertexAi);
-                    ResponseStream<GenerateContentResponse> responseStream = model.generateContentStream(userQuery);
+                // The method on GenerativeModel for streaming is generateContentStream
+                Iterator<GenerateContentResponse> responseIterator = generativeAiModel.generateContentStream(content);
 
-                    for (GenerateContentResponse response : responseStream) {
-                        response.getCandidatesList().forEach(candidate -> {
-                            candidate.getContent().getPartsList().forEach(part -> {
-                                if (part.hasText()) {
-                                    try {
-                                        outputStream.write(part.getText().getBytes(StandardCharsets.UTF_8));
-                                        outputStream.flush();
-                                    } catch (IOException e) {
-                                        log.error("Error writing to output stream", e);
-                                        throw new RuntimeException("Error writing to output stream", e);
-                                    }
+                while (responseIterator.hasNext()) {
+                    GenerateContentResponse response = responseIterator.next();
+                    if (response.getCandidatesCount() > 0) {
+                        // Process parts from the first candidate
+                        response.getCandidates(0).getContent().getPartsList().forEach(part -> {
+                            if (part.hasText()) {
+                                try {
+                                    outputStream.write(part.getText().getBytes(StandardCharsets.UTF_8));
+                                    outputStream.flush();
+                                } catch (IOException e) {
+                                    log.error("Error writing to output stream", e);
+                                    // Hard to recover here, rethrow to stop processing
+                                    throw new RuntimeException("Error writing to output stream", e);
                                 }
-                            });
+                            }
                         });
                     }
                 }
-            } catch (NoClassDefFoundError | ClassNotFoundException e) {
-                log.error("SDK class not found, likely VertexAISettings or related: " + e.getMessage(), e);
-                try {
-                    outputStream.write(("Error: A required SDK class was not found. This might indicate an issue with the SDK version or the specific classes used for configuration (e.g., VertexAISettings). Details: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
-                    outputStream.flush();
-                } catch (IOException ex) { /* ignore */ }
             } catch (Exception e) {
                 log.error("Error during Gemini API call or streaming: " + e.getMessage(), e);
-                try {
-                    // Try to send a generic error message to the client
-                    outputStream.write(("Error processing your request: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
-                    outputStream.flush();
-                } catch (IOException ex) {
-                    log.error("Error writing error message to output stream", ex);
-                }
+                // Attempt to write an error message to the client's stream
+                writeErrorToStream(outputStream, "Error processing your request: " + e.getMessage());
             } finally {
                 try {
                     outputStream.close();
@@ -131,5 +115,14 @@ public class GeminiService {
                 }
             }
         };
+    }
+
+    private void writeErrorToStream(OutputStream outputStream, String errorMessage) {
+        try {
+            outputStream.write(errorMessage.getBytes(StandardCharsets.UTF_8));
+            outputStream.flush();
+        } catch (IOException ex) {
+            log.error("Error writing error message to output stream", ex);
+        }
     }
 }
