@@ -2,6 +2,8 @@ package com.alibou.security.gemini;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -19,7 +21,21 @@ public class GeminiController {
     public ResponseEntity<StreamingResponseBody> queryGemini(
             @RequestBody GeminiRequest request
     ) {
-        StreamingResponseBody stream = geminiService.streamQuery(request.getQuery());
-        return ResponseEntity.ok(stream);
+        StreamingResponseBody originalStream = geminiService.streamQuery(request.getQuery());
+        // Get current SecurityContext from the request thread
+        SecurityContext securityContext = SecurityContextHolder.getContext();
+        // Wrap the original StreamingResponseBody to propagate the context
+        StreamingResponseBody wrappedStream = outputStream -> {
+            // Set the SecurityContext for the current thread
+            SecurityContextHolder.setContext(securityContext);
+            try {
+                originalStream.writeTo(outputStream);
+            } finally {
+                // Clear the SecurityContext after writing
+                SecurityContextHolder.clearContext();
+            }
+        };
+        return ResponseEntity.ok(wrappedStream);
+
     }
 }
