@@ -24,5 +24,6 @@ application:
 
 # GEMINI_PROJECT_ID: "your-gcp-project-id" # No longer used by GeminiService
 # GEMINI_LOCATION: "us-central1"           # No longer used by GeminiService
+GEMINI_API_BASE_URL: "https://generativelanguage.googleapis.com"
 GEMINI_MODEL_NAME: "gemini-pro"
 # GEMINI_API_KEY is expected to be set as an environment variable
